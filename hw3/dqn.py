@@ -128,7 +128,14 @@ def learn(env,
     ######
     
     # YOUR CODE HERE
+    currQNetOut = q_func(obs_t_float, num_actions, scope='q_func', reuse=False) * act_t_ph
+    targetQNetOut = q_func(obs_t_float, num_actions, scope='target_q_func', reuse=False) * act_t_ph
+    total_error = tf.reduce_mean(tf.square(targetQNetOut - currQNetOut))
 
+
+    q_func_vars = tf.get_collection(tf.GraphKeys.VARIABLES, scope='q_func')
+    target_q_func_vars = tf.get_collection(tf.GraphKeys.VARIABLES, scope='target_q_func')
+   
     ######
 
     # construct optimization op (with gradient clipping)
@@ -193,8 +200,21 @@ def learn(env,
         # might as well be random, since you haven't trained your net...)
 
         #####
-        
-        # YOUR CODE HERE
+	
+	obs_idx = replay_buffer.store_frame(last_obs)	
+
+ 	if random.random() < exploration.value(t):
+		action = random.randint(0,num_actions-1)
+	else:
+		encoded_obs = replay_buffer.encode_recent_observation()
+		q_net_output = q_func(encoded_obs, num_actions, scope='target_q_func', reuse=False)
+		action = tf.argmax(q_net_output, dimension=0)
+	
+	last_obs, reward, done, info = env.step(action)	
+	replay_buffer.store_effect(obs_idx, action, reward, done)
+
+        if done:
+		last_obs = env.reset()
 
         #####
 
@@ -245,7 +265,23 @@ def learn(env,
             #####
             
             # YOUR CODE HERE
-
+	    if replay_buffer.can_sample(batch_size):
+	        obs_batch, act_batch, rew_batch, next_obs_batch, done_mask = replay_buffer.sample(batch_size)
+	    
+	    if not model_initialized:
+		initialize_interdependent_variables(session, tf.global_variables(), {
+                    obs_t_ph: obs_batch,
+                    obs_tp1_ph: next_obs_batch,
+                })
+	    
+	    train_dict = {obs_t_ph: obs_batch, act_t_ph: act_batch, rew_t_ph: rew_batch, obs_tp1_ph next_obs_batch, done_mask_ph: done_mask,
+	    learning_rate: optimizer_spec.lr_schedule.value(t)}
+	    session.run(train_fn, feed_dict=train_dict)
+		
+	    if t == (target_update_freq * (num_param_updates + 1)):
+		num_param_updates += 1
+	        session.run(update_target_fn)
+	    
             #####
 
         ### 4. Log progress
