@@ -6,11 +6,13 @@ import random
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.layers as layers
-
+import os
 import dqn
 from dqn_utils import *
 from atari_wrappers import *
 
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 def atari_model(img_in, num_actions, scope, reuse=False):
     # as described in https://storage.googleapis.com/deepmind-data/assets/papers/DeepMindNature14236Paper.pdf

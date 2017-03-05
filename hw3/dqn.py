@@ -128,13 +128,16 @@ def learn(env,
     ######
     
     # YOUR CODE HERE
-    act_map = tf.one_hot(act_t_ph, num_actions, off_value=0.0, on_value=1.0, axis=-1)
-    currQNetOut = q_func(obs_t_float, num_actions, scope='q_func', reuse=False)
-    targetQNetOut = q_func(obs_t_float, num_actions, scope='target_q_func', reuse=False) 
-    total_error = tf.reduce_mean(tf.square((targetQNetOut*act_map) - (currQNetOut * act_map)))
+    Amat = tf.one_hot(act_t_ph, num_actions, off_value=0.0, on_value=1.0, axis=-1)
+    currQ = q_func(obs_t_float, num_actions, scope='q_func', reuse=False)
+    targetQ = q_func(obs_tp1_float, num_actions, scope='tq_func', reuse=False)
 
-    q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_func')
-    target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='target_q_func')
+    srcQVal = tf.reduce_sum(currQ * Amat, reduction_indices=1)
+    targetQVal = rew_t_ph + gamma * tf.reduce_max(targetQ, reduction_indices=1)
+    total_error = tf.reduce_mean(tf.square(targetQVal - srcQVal))
+
+    q_func_vars = tf.get_collection(tf.GraphKeys.VARIABLES, scope='q_func')
+    target_q_func_vars = tf.get_collection(tf.GraphKeys.VARIABLES, scope='tq_func')
    
     ######
 
@@ -202,17 +205,17 @@ def learn(env,
         #####
 	
 	obs_idx = replay_buffer.store_frame(last_obs)	
-        if random.random() < exploration.value(t) or t < learning_starts:
+
+        if random.random() < exploration.value(t) or not model_initialized:
                 action = random.randint(0,num_actions-1)
 	else:
 		encoded_obs = replay_buffer.encode_recent_observation()
                 encoded_obs = encoded_obs[np.newaxis, ...]
-                q_func_eval = targetQNetOut.eval({obs_t_ph: encoded_obs}, session=session)
-                action = tf.argmax(q_func_eval, dimension=0)
-	
+                q_func_eval = currQ.eval({obs_t_ph: encoded_obs}, session=session)
+                action = np.argmax(q_func_eval)
+
 	last_obs, reward, done, info = env.step(action)	
 	replay_buffer.store_effect(obs_idx, action, reward, done)
-
         if done:
 		last_obs = env.reset()
 
@@ -268,17 +271,17 @@ def learn(env,
 	    obs_batch, act_batch, rew_batch, next_obs_batch, done_mask = replay_buffer.sample(batch_size)
 	    
 	    if not model_initialized:
-                print "DO WE GET HERE>>>>"
-		initialize_interdependent_variables(session, tf.global_variables(), {
+		model_initialized = True
+		initialize_interdependent_variables(session, tf.all_variables(), {
                     obs_t_ph: obs_batch,
                     obs_tp1_ph: next_obs_batch,
                 })
 	    
             train_dict = {obs_t_ph: obs_batch, act_t_ph: act_batch, rew_t_ph: rew_batch, obs_tp1_ph: next_obs_batch, 
                                 done_mask_ph: done_mask, learning_rate: optimizer_spec.lr_schedule.value(t)}
+	    
 	    session.run(train_fn, feed_dict=train_dict)
-		
-	    if t == (target_update_freq * (num_param_updates + 1)):
+	    if t % target_update_freq == 0:
 		num_param_updates += 1
 	        session.run(update_target_fn)
 	    
@@ -297,4 +300,5 @@ def learn(env,
             print("episodes %d" % len(episode_rewards))
             print("exploration %f" % exploration.value(t))
             print("learning_rate %f" % optimizer_spec.lr_schedule.value(t))
-            sys.stdout.flush()
+            print
+	    sys.stdout.flush()
