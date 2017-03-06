@@ -1,0 +1,6 @@
+To run code:
+
+python run_dqn_atari.py <gpu-id> <learn-rate-multiplier>
+
+<gpu-id> = the gpu you wish to use
+<learn-rate-multiplier> = controls learning rate; set to 1 for default

@@ -1,4 +1,5 @@
 import argparse
+import sys
 import gym
 from gym import wrappers
 import os.path as osp
@@ -7,12 +8,10 @@ import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.layers as layers
 import os
+
 import dqn
 from dqn_utils import *
 from atari_wrappers import *
-
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 def atari_model(img_in, num_actions, scope, reuse=False):
     # as described in https://storage.googleapis.com/deepmind-data/assets/papers/DeepMindNature14236Paper.pdf
@@ -32,11 +31,12 @@ def atari_model(img_in, num_actions, scope, reuse=False):
 
 def atari_learn(env,
                 session,
-                num_timesteps):
+                num_timesteps, lr_mult):
     # This is just a rough estimate
     num_iterations = float(num_timesteps) / 4.0
 
-    lr_multiplier = 1.0
+    #lr_multiplier = 1.0
+    lr_multiplier = float(lr_mult)
     lr_schedule = PiecewiseSchedule([
                                          (0,                   1e-4 * lr_multiplier),
                                          (num_iterations / 10, 1e-4 * lr_multiplier),
@@ -95,16 +95,17 @@ def set_global_seeds(i):
     np.random.seed(i)
     random.seed(i)
 
-def get_session():
+def get_session(gpu_id):
     tf.reset_default_graph()
     tf_config = tf.ConfigProto(
         inter_op_parallelism_threads=1,
         intra_op_parallelism_threads=1)
+    tf_config.gpu_options.visible_device_list=gpu_id
     session = tf.Session(config=tf_config)
     print("AVAILABLE GPUS: ", get_available_gpus())
     return session
 
-def get_env(task, seed):
+def get_env(task, seed, lr_mult):
     env_id = task.env_id
 
     env = gym.make(env_id)
@@ -112,13 +113,13 @@ def get_env(task, seed):
     set_global_seeds(seed)
     env.seed(seed)
 
-    expt_dir = 'hw3_vid_dir2/'
+    expt_dir = 'hw3_vid_dir2_%s/' % (str(lr_mult))
     env = wrappers.Monitor(env, osp.join(expt_dir, "gym"), force=True)
     env = wrap_deepmind(env)
 
     return env
 
-def main():
+def main(lr_multiplier, gpu_id):
     # Get Atari games.
     benchmark = gym.benchmark_spec('Atari40M')
 
@@ -127,9 +128,15 @@ def main():
 
     # Run training
     seed = 0 # Use a seed of zero (you may want to randomize the seed!)
-    env = get_env(task, seed)
-    session = get_session()
-    atari_learn(env, session, num_timesteps=task.max_timesteps)
+    env = get_env(task, seed, lr_multiplier)
+    session = get_session(gpu_id)
+    #atari_learn(env, session, num_timesteps=task.max_timesteps)
+    atari_learn(env, session, num_timesteps=task.max_timesteps, lr_mult=lr_multiplier)
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) != 3:
+        print "Incorrect number of arguments..."
+    else:
+	gpu_id = sys.argv[1]
+	lr_mult = sys.argv[2]
+        main(lr_mult, gpu_id)
