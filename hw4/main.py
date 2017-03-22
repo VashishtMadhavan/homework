@@ -1,6 +1,7 @@
 import numpy as np
 import tensorflow as tf
 import gym
+import os
 import logz
 import scipy.signal
 
@@ -20,7 +21,7 @@ def dense(x, size, name, weight_init=None):
     Dense (fully connected) layer
     """
     w = tf.get_variable(name + "/w", [x.get_shape()[1], size], initializer=weight_init)
-    b = tf.get_variable(name + "/b", [size], initializer=tf.zeros_initializer())
+    b = tf.get_variable(name + "/b", [size], initializer=tf.constant_initializer(0.))
     return tf.matmul(x, w) + b
 
 def fancy_slice_2d(X, inds0, inds1):
@@ -213,13 +214,32 @@ def main_pendulum(logdir, seed, n_iter, gamma, min_timesteps_per_batch, initial_
     elif vf_type == 'nn':
         vf = NnValueFunction(ob_dim=ob_dim, **vf_params)
 
+    sy_ob_no = tf.placeholder(shape=[None, ob_dim], name="ob", dtype=tf.float32) # batch of observations
+    sy_ac_n = tf.placeholder(shape=[None, ac_dim], name="ac", dtype=tf.int32) # batch of actions taken by the policy, used for policy gradient computation
+    sy_adv_n = tf.placeholder(shape=[None], name="adv", dtype=tf.float32) # advantage function estimate
+    sy_old_mean = tf.placeholder(shape=[ac_dim], name='oldmean', dtype=tf.float32) # mean before update; used for KL calc
+    sy_old_logstdv = tf.placeholder(shape=[ac_dim], name='oldstdev', dtype=tf.float32) # logits BEFORE update (just used for KL diagnostic)
 
-    YOUR_CODE_HERE
+    
+    if vf_type == "linear":
+        sy_h1 = lrelu(dense(sy_ob_no, 32, "h1", weight_init=normc_initializer(1.0)))
+    elif vf_type == "nn":
+        pass
+    
+    mean_na = dense(sy_h1, ac_dim, "final", weight_init=normc_initializer(0.1)) # Mean control output
+    logstd_a = tf.get_variable("logstdev", [ac_dim], initializer=tf.zeros_initializer) # Variance
+    dist = tf.contrib.distributions.Normal(mu=tf.reduce_mean(mean_na), sigma=tf.exp(logstd_a))
 
+    sy_n = tf.shape(sy_ob_no)[0]
+    sy_sampled_ac = dist.sample(sy_n) 
+    sy_logprob_n = tf.log(dist.pdf(sy_sampled_ac))
 
-    sy_surr = - tf.reduce_mean(sy_adv_n * sy_logprob_n) # Loss function that we'll differentiate to get the policy gradient ("surr" is for "surrogate loss")
+    sy_kl = tf.reduce_mean(-0.5 + tf.log(tf.exp(logstd_a) / tf.exp(sy_old_logstdv)) + 
+        (tf.square(sy_old_mean - mean_na) + tf.square(tf.exp(sy_old_logstdv)))*0.5/tf.square(tf.exp(logstd_a)))
+    sy_ent = tf.log(tf.exp(logstd_a) * np.sqrt(2 * np.pi * np.exp(1)))
 
-    sy_stepsize = tf.placeholder(shape=[], dtype=tf.float32) # Symbolic, in case you want to change the stepsize during optimization. (We're not doing that currently)
+    sy_surr = - tf.reduce_mean(sy_adv_n * sy_logprob_n) 
+    sy_stepsize = tf.placeholder(shape=[], dtype=tf.float32) 
     update_op = tf.train.AdamOptimizer(sy_stepsize).minimize(sy_surr)
 
     sess = tf.Session()
@@ -232,8 +252,54 @@ def main_pendulum(logdir, seed, n_iter, gamma, min_timesteps_per_batch, initial_
     for i in range(n_iter):
         print("********** Iteration %i ************"%i)
 
-        YOUR_CODE_HERE
+        #YOUR_CODE_HERE
+        # Collect paths until we have enough timesteps
+        timesteps_this_batch = 0
+        paths = []
+        while True:
+            ob = env.reset()
+            terminated = False
+            obs, acs, rewards = [], [], []
+            animate_this_episode=(len(paths)==0 and (i % 10 == 0) and animate)
+            while True:
+                if animate_this_episode:
+                    env.render()
+                obs.append(ob)
+                ac = sess.run(sy_sampled_ac, feed_dict={sy_ob_no : ob[None]})[0]
+                acs.append(ac)
+                ob, rew, done, _ = env.step(ac)
+                rewards.append(rew)
+                if done:
+                    break                    
+            path = {"observation" : np.array(obs), "terminated" : terminated,
+                    "reward" : np.array(rewards), "action" : np.array(acs)}
+            paths.append(path)
+            timesteps_this_batch += pathlength(path)
+            if timesteps_this_batch > min_timesteps_per_batch:
+                break
+        total_timesteps += timesteps_this_batch
+        # Estimate advantage function
+        vtargs, vpreds, advs = [], [], []
+        for path in paths:
+            rew_t = path["reward"]
+            return_t = discount(rew_t, gamma)
+            vpred_t = vf.predict(path["observation"])
+            adv_t = return_t - vpred_t
+            advs.append(adv_t)
+            vtargs.append(return_t)
+            vpreds.append(vpred_t)
 
+        # Build arrays for policy update
+        ob_no = np.concatenate([path["observation"] for path in paths])
+        ac_n = np.concatenate([path["action"] for path in paths])
+        adv_n = np.concatenate(advs)
+        standardized_adv_n = (adv_n - adv_n.mean()) / (adv_n.std() + 1e-8)
+        vtarg_n = np.concatenate(vtargs)
+        vpred_n = np.concatenate(vpreds)
+        vf.fit(ob_no, vtarg_n)
+
+        old_mean, old_stdev = sess.run([mean_na, logstd_a], feed_dict={sy_ob_no: ob_no, sy_ac_n: ac_n, sy_adv_n: standardized_adv_n})
+        kl, ent = sess.run([sy_kl, sy_ent], feed_dict={sy_ob_no:ob_no, sy_old_mean: np.mean(old_mean,axis=0), sy_old_logstdv: old_stdev})
         if kl > desired_kl * 2: 
             stepsize /= 1.5
             print('stepsize -> %s'%stepsize)
@@ -243,6 +309,8 @@ def main_pendulum(logdir, seed, n_iter, gamma, min_timesteps_per_batch, initial_
         else:
             print('stepsize OK')
 
+        # Policy update
+        update = sess.run([update_op], feed_dict={sy_ob_no: ob_no, sy_ac_n: ac_n, sy_adv_n: standardized_adv_n, sy_stepsize: stepsize})
 
         # Log diagnostics
         logz.log_tabular("EpRewMean", np.mean([path["reward"].sum() for path in paths]))
@@ -261,18 +329,18 @@ def main_pendulum1(d):
     return main_pendulum(**d)
 
 if __name__ == "__main__":
-    if 1:
-        main_cartpole(logdir=None) # when you want to start collecting results, set the logdir
-    if 0:
-        general_params = dict(gamma=0.97, animate=False, min_timesteps_per_batch=2500, n_iter=300, initial_stepsize=1e-3)
-        params = [
-            dict(logdir='/tmp/ref/linearvf-kl2e-3-seed0', seed=0, desired_kl=2e-3, vf_type='linear', vf_params={}, **general_params),
-            dict(logdir='/tmp/ref/nnvf-kl2e-3-seed0', seed=0, desired_kl=2e-3, vf_type='nn', vf_params=dict(n_epochs=10, stepsize=1e-3), **general_params),
-            dict(logdir='/tmp/ref/linearvf-kl2e-3-seed1', seed=1, desired_kl=2e-3, vf_type='linear', vf_params={}, **general_params),
-            dict(logdir='/tmp/ref/nnvf-kl2e-3-seed1', seed=1, desired_kl=2e-3, vf_type='nn', vf_params=dict(n_epochs=10, stepsize=1e-3), **general_params),
-            dict(logdir='/tmp/ref/linearvf-kl2e-3-seed2', seed=2, desired_kl=2e-3, vf_type='linear', vf_params={}, **general_params),
-            dict(logdir='/tmp/ref/nnvf-kl2e-3-seed2', seed=2, desired_kl=2e-3, vf_type='nn', vf_params=dict(n_epochs=10, stepsize=1e-3), **general_params),
-        ]
-        import multiprocessing
-        p = multiprocessing.Pool()
-        p.map(main_pendulum1, params)
+	if 0:
+		main_cartpole(logdir=None) # when you want to start collecting results, set the logdir
+	if 1:
+		general_params = dict(gamma=0.97, animate=False, min_timesteps_per_batch=2500, n_iter=300, initial_stepsize=1e-3)
+		params = [
+		dict(logdir='/tmp/ref/linearvf-kl2e-3-seed0', seed=0, desired_kl=2e-3, vf_type='linear', vf_params={}, **general_params),
+		dict(logdir='/tmp/ref/nnvf-kl2e-3-seed0', seed=0, desired_kl=2e-3, vf_type='nn', vf_params=dict(n_epochs=10, stepsize=1e-3), **general_params),
+		dict(logdir='/tmp/ref/linearvf-kl2e-3-seed1', seed=1, desired_kl=2e-3, vf_type='linear', vf_params={}, **general_params),
+		dict(logdir='/tmp/ref/nnvf-kl2e-3-seed1', seed=1, desired_kl=2e-3, vf_type='nn', vf_params=dict(n_epochs=10, stepsize=1e-3), **general_params),
+		dict(logdir='/tmp/ref/linearvf-kl2e-3-seed2', seed=2, desired_kl=2e-3, vf_type='linear', vf_params={}, **general_params),
+		dict(logdir='/tmp/ref/nnvf-kl2e-3-seed2', seed=2, desired_kl=2e-3, vf_type='nn', vf_params=dict(n_epochs=10, stepsize=1e-3), **general_params),
+		]
+		import multiprocessing
+		p = multiprocessing.Pool()
+		p.map(main_pendulum1, params)
