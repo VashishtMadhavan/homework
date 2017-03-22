@@ -1,6 +1,9 @@
 import sys
 import gym.spaces
 import itertools
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import numpy as np
 import random
 import tensorflow                as tf
@@ -128,13 +131,16 @@ def learn(env,
     ######
     
     # YOUR CODE HERE
-    act_map = tf.one_hot(act_t_ph, num_actions, off_value=0.0, on_value=1.0, axis=-1)
-    currQNetOut = q_func(obs_t_float, num_actions, scope='q_func', reuse=False)
-    targetQNetOut = q_func(obs_t_float, num_actions, scope='target_q_func', reuse=False) 
-    total_error = tf.reduce_mean(tf.square((targetQNetOut*act_map) - (currQNetOut * act_map)))
+    Amat = tf.one_hot(act_t_ph, num_actions, off_value=0.0, on_value=1.0, axis=-1)
+    currQ = q_func(obs_t_float, num_actions, scope='q_func', reuse=False)
+    targetQ = q_func(obs_tp1_float, num_actions, scope='tq_func', reuse=False)
+
+    srcQVal = tf.reduce_sum(currQ * Amat, reduction_indices=1)
+    targetQVal = rew_t_ph + gamma * tf.reduce_max(targetQ, reduction_indices=1) * (1 - done_mask_ph)
+    total_error = tf.reduce_mean(tf.square(targetQVal - srcQVal))
 
     q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_func')
-    target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='target_q_func')
+    target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='tq_func')
    
     ######
 
@@ -164,8 +170,14 @@ def learn(env,
     last_obs = env.reset()
     LOG_EVERY_N_STEPS = 10000
 
+    plot_iters = []
+    plot_mean_rewards = []
+    plot_best_rewards = []
+
     for t in itertools.count():
-        ### 1. Check stopping criterion
+        if t == 2000000:
+	   break
+	### 1. Check stopping criterion
         if stopping_criterion is not None and stopping_criterion(env, t):
             break
 
@@ -202,17 +214,17 @@ def learn(env,
         #####
 	
 	obs_idx = replay_buffer.store_frame(last_obs)	
-        if random.random() < exploration.value(t) or t < learning_starts:
+
+        if random.random() < exploration.value(t) or not model_initialized:
                 action = random.randint(0,num_actions-1)
 	else:
 		encoded_obs = replay_buffer.encode_recent_observation()
                 encoded_obs = encoded_obs[np.newaxis, ...]
-                q_func_eval = targetQNetOut.eval({obs_t_ph: encoded_obs}, session=session)
-                action = tf.argmax(q_func_eval, dimension=0)
-	
+                q_func_eval = currQ.eval({obs_t_ph: encoded_obs}, session=session)
+                action = np.argmax(q_func_eval)
+
 	last_obs, reward, done, info = env.step(action)	
 	replay_buffer.store_effect(obs_idx, action, reward, done)
-
         if done:
 		last_obs = env.reset()
 
@@ -268,7 +280,7 @@ def learn(env,
 	    obs_batch, act_batch, rew_batch, next_obs_batch, done_mask = replay_buffer.sample(batch_size)
 	    
 	    if not model_initialized:
-                print "DO WE GET HERE>>>>"
+		model_initialized = True
 		initialize_interdependent_variables(session, tf.global_variables(), {
                     obs_t_ph: obs_batch,
                     obs_tp1_ph: next_obs_batch,
@@ -276,9 +288,9 @@ def learn(env,
 	    
             train_dict = {obs_t_ph: obs_batch, act_t_ph: act_batch, rew_t_ph: rew_batch, obs_tp1_ph: next_obs_batch, 
                                 done_mask_ph: done_mask, learning_rate: optimizer_spec.lr_schedule.value(t)}
+	    
 	    session.run(train_fn, feed_dict=train_dict)
-		
-	    if t == (target_update_freq * (num_param_updates + 1)):
+	    if t % target_update_freq == 0:
 		num_param_updates += 1
 	        session.run(update_target_fn)
 	    
@@ -291,10 +303,25 @@ def learn(env,
         if len(episode_rewards) > 100:
             best_mean_episode_reward = max(best_mean_episode_reward, mean_episode_reward)
         if t % LOG_EVERY_N_STEPS == 0 and model_initialized:
+	    if best_mean_episode_reward != -float('inf'):
+	        plot_iters.append(t); plot_mean_rewards.append(mean_episode_reward); plot_best_rewards.append(best_mean_episode_reward)
+		#plt.title("Pong Rewards over time")
+		#plt.xlabel("Timesteps")
+		#plt.ylabel("Reward")
+		#plt.plot(plot_iters, plot_mean_rewards, label="Mean Reward")
+		#plt.plot(plot_iters, plot_best_rewards, label="Best Reward")
+		#plt.legend(loc="upper left")
+		#plt.savefig("plot1.png")
+		#plt.clf()
             print("Timestep %d" % (t,))
             print("mean reward (100 episodes) %f" % mean_episode_reward)
             print("best mean reward %f" % best_mean_episode_reward)
             print("episodes %d" % len(episode_rewards))
             print("exploration %f" % exploration.value(t))
             print("learning_rate %f" % optimizer_spec.lr_schedule.value(t))
-            sys.stdout.flush()
+            print
+	    sys.stdout.flush()
+
+	with open('results6.txt','w') as f:
+	    for i in range(len(plot_iters)):
+	        f.write('%s %s\n' %(plot_iters[i], plot_mean_rewards[i]))
